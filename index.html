@@ -85,6 +85,10 @@
   .check { display: flex; gap: 10px; align-items: center; font-size: 15px; margin-top: 16px; }
   .check input { width: 20px; height: 20px; accent-color: var(--accent); }
   #trims[hidden] { display: none; }
+  .diag { margin-top: 12px; }
+  .diag summary { font-size: 14px; color: var(--muted); font-weight: 500; }
+  .diag pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.4; background: var(--bg); border-radius: 10px; padding: 10px; margin: 10px 0; user-select: text; -webkit-user-select: text; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
   ul.tips { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
   ul.tips li + li { margin-top: 4px; }
 </style>
@@ -118,6 +122,14 @@
       <p id="calInfo" class="calinfo">Not calibrated.</p>
       <button id="recal" class="secondary" disabled>Recalibrate</button>
     </div>
+    <details id="diag" class="diag">
+      <summary>Diagnostics</summary>
+      <pre id="diagText"></pre>
+      <div class="btns">
+        <button id="copyDiag" class="secondary">Copy diagnostics</button>
+        <button id="saveRec" class="secondary" disabled>Save recording</button>
+      </div>
+    </details>
   </section>
 
   <details class="card" id="settings">
@@ -165,7 +177,7 @@
     <li>Works best at a steady cruise. It fades during hard acceleration and recovers once speed settles.</li>
   </ul>
 </main>
-<script src="dsp.js"></script>
-<script src="app.js"></script>
+<script src="dsp.js?v=2"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>

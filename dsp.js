@@ -100,34 +100,50 @@
       return { hr, hi };
     });
 
-    // Coarse delay: envelope peak of the averaged impulse response.
+    // Each pass's arrival: envelope peak of its impulse response, and how far that peak
+    // stands above the rest of the response (SNR). Bluetooth can shift the delay by a few
+    // milliseconds between passes, so each pass is aligned on its own peak.
     const searchMax = Math.min(N - 2, Math.round(Math.max(0.2, (len - sweep.length) / sr - 0.1) * sr));
-    const env = (i) => {
-      let r = 0, im_ = 0;
-      for (const p of passes) { r += p.hr[i]; im_ += p.hi[i]; }
-      return Math.hypot(r, im_);
-    };
-    let i0 = 1, best = -1;
-    for (let i = 1; i < searchMax; i++) { const m = env(i); if (m > best) { best = m; i0 = i; } }
-    const m0 = env(i0 - 1), m1 = env(i0), m2 = env(i0 + 1);
-    const den = m0 - 2 * m1 + m2;
-    const tau0 = (i0 + (den !== 0 ? 0.5 * (m0 - m2) / den : 0)) / sr;
+    for (const p of passes) {
+      const envs = new Float64Array(searchMax);
+      let ip = 1, best = -1;
+      for (let i = 1; i < searchMax; i++) {
+        const m = Math.hypot(p.hr[i], p.hi[i]);
+        envs[i] = m;
+        if (m > best) { best = m; ip = i; }
+      }
+      const sorted = Array.from(envs.subarray(1)).sort((x, y) => x - y);
+      p.peak = ip;
+      p.snrDb = 20 * Math.log10(best / (sorted[sorted.length >> 1] + 1e-30));
+    }
+    const order = passes.map((p) => p.peak).sort((x, y) => x - y);
+    const i0 = order[order.length >> 1];
 
-    // Keep only 30 ms before to 250 ms after the arrival. Noise and the drone are spread
-    // over the whole recording; the stereo's response is not.
+    // Keep only 30 ms before to 250 ms after each arrival, moved to the common delay.
+    // Noise and the drone are spread over the whole recording; the stereo's response is not.
     const wa = Math.round(0.03 * sr), wb = Math.round(0.25 * sr), wt = Math.round(0.01 * sr);
     const Hp = passes.map((p) => {
       const r = new Float64Array(N), im_ = new Float64Array(N);
       for (let d = -wa; d <= wb; d++) {
-        const i = ((i0 + d) % N + N) % N;
+        const src = ((p.peak + d) % N + N) % N;
+        const dst = ((i0 + d) % N + N) % N;
         let w = 1;
         if (d < -wa + wt) w = 0.5 - 0.5 * Math.cos(Math.PI * (d + wa) / wt);
         else if (d > wb - wt) w = 0.5 - 0.5 * Math.cos(Math.PI * (wb - d) / wt);
-        r[i] = p.hr[i] * w; im_[i] = p.hi[i] * w;
+        r[dst] = p.hr[src] * w; im_[dst] = p.hi[src] * w;
       }
-      fft(r, im_, false);
-      return { hr: r, hi: im_ };
+      return { r, im_ };
     });
+    // Sub-sample coarse delay from the aligned average envelope.
+    const env = (i) => {
+      let a = 0, b = 0;
+      for (const h of Hp) { a += h.r[i]; b += h.im_[i]; }
+      return Math.hypot(a, b);
+    };
+    const m0 = env(i0 - 1), m1 = env(i0), m2 = env(i0 + 1);
+    const den = m0 - 2 * m1 + m2;
+    const tau0 = (i0 + (den !== 0 ? 0.5 * (m0 - m2) / den : 0)) / sr;
+    for (const h of Hp) { fft(h.r, h.im_, false); h.hr = h.r; h.hi = h.im_; }
     const P = Hp.length;
     const Hr = new Float64Array(kmax + 1), Hi = new Float64Array(kmax + 1);
     for (const h of Hp) for (let k = 0; k <= kmax; k++) { Hr[k] += h.hr[k] / P; Hi[k] += h.hi[k] / P; }
@@ -211,7 +227,12 @@
     mags.sort((x, y) => x - y);
     const level = mags[mags.length >> 1] || 0;
 
-    return { tau, tauCoarse: tau0, f0, df, re, im, quality, level, minMag2: Math.pow(0.1 * level, 2), sampleRate: sr };
+    const passInfo = passes.map((p) => ({ delayMs: +(1000 * p.peak / sr).toFixed(1), snrDb: +p.snrDb.toFixed(1) }));
+    const snrs = passInfo.map((p) => p.snrDb).sort((x, y) => x - y);
+    return {
+      tau, tauCoarse: tau0, f0, df, re, im, quality, level, minMag2: Math.pow(0.1 * level, 2), sampleRate: sr,
+      passes: passInfo, snrDb: snrs[snrs.length >> 1],
+    };
   }
 
   // Strongest narrow peaks in a dB spectrum between fmin and fmax.

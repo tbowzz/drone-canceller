@@ -37,7 +37,7 @@ let rngState = 12345;
 const rand = () => { rngState = (rngState * 1664525 + 1013904223) >>> 0; return rngState / 4294967296; };
 const gauss = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
 const D = Math.round(DELAY * SR);
-const dl = new Float32Array(D + 1); let dlPos = 0;
+const DL = 1 << 17; const dl = new Float32Array(DL); let dlPos = 0; let extraDelay = 0; // samples added per calibration pass (Bluetooth jitter)
 // 2nd-order high-pass at 60 Hz (speaker roll-off) → adds frequency-dependent phase
 function biquadHP(fc, q) {
   const w = 2 * Math.PI * fc / SR, al = Math.sin(w) / (2 * q), cw = Math.cos(w);
@@ -47,14 +47,15 @@ function biquadHP(fc, q) {
   return (x) => { const y = B[0] * x + B[1] * x1 + B[2] * x2 - A[0] * y1 - A[1] * y2; x2 = x1; x1 = x; y2 = y1; y1 = y; return y; };
 }
 const hp = biquadHP(60, 0.707);
-let pathGain = 0.5;
+let pathGain = 0.5 * (args.calLevel ?? 1);
 let lpNoise = 0;
 const lpA = 1 - Math.exp(-2 * Math.PI * 100 / SR);
 let droneTheta = 0, t = 0;
 function droneFreq(time) { return 92 + DRIFT * Math.sin(2 * Math.PI * time / 40); }
 function micSample(yOut, droneOn) {
-  dl[dlPos] = yOut; dlPos = (dlPos + 1) % dl.length;
-  const delayed = dl[dlPos];
+  dl[dlPos] = yOut;
+  const delayed = dl[(dlPos - D - extraDelay + 1 + 2 * DL) % DL];
+  dlPos = (dlPos + 1) % DL;
   const speaker = pathGain * hp(delayed);
   const f = droneFreq(t);
   droneTheta += 2 * Math.PI * f / SR;
@@ -87,6 +88,7 @@ const sweep = DSP.makeSweep(SR);
 const recLen = sweep.length + Math.round(DSP.CAL.tailSeconds * SR);
 const recs = [];
 for (let p = 0; p < (args.passes || DSP.CAL.passes); p++) {
+  extraDelay = Math.round(((args.jitterMs || 0) / 1000) * SR * [0, 1, -1, 0.5][p % 4]);
   send({ type: 'calibrate', sweep, recLength: recLen });
   while (true) {
     runBlock(CAL_DRONE);
@@ -94,6 +96,15 @@ for (let p = 0; p < (args.passes || DSP.CAL.passes); p++) {
     if (i >= 0) { recs.push(outbox.splice(i, 1)[0].rec); break; }
   }
   for (let k = 0; k < Math.round(DSP.CAL.gapSeconds * SR / B); k++) runBlock(CAL_DRONE);
+}
+extraDelay = 0;
+if (process.env.DUMP_WAV) {
+  const n = recs.reduce((a, r) => a + r.length, 0), buf = Buffer.alloc(44 + 2 * n);
+  buf.write('RIFF', 0); buf.writeUInt32LE(36 + 2 * n, 4); buf.write('WAVEfmt ', 8); buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22); buf.writeUInt32LE(SR, 24); buf.writeUInt32LE(2 * SR, 28);
+  buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34); buf.write('data', 36); buf.writeUInt32LE(2 * n, 40);
+  let o = 44; for (const r of recs) for (const v of r) { buf.writeInt16LE(Math.round(Math.max(-1, Math.min(1, v)) * 32767), o); o += 2; }
+  fs.writeFileSync(process.env.DUMP_WAV, buf);
 }
 const cal = DSP.analyzeCalibration(sweep, recs, SR);
 
@@ -117,7 +128,7 @@ function estS(f) {
   const ang = -2 * Math.PI * f * cal.tau;
   return [rr * Math.cos(ang) - ri * Math.sin(ang), rr * Math.sin(ang) + ri * Math.cos(ang)];
 }
-console.log(`calibration: tau=${(cal.tau * 1000).toFixed(2)} ms (true ${((D + B) / SR * 1000).toFixed(2)}), coarse=${(cal.tauCoarse * 1000).toFixed(2)} ms, quality=${cal.quality.toFixed(3)}, level=${cal.level.toFixed(3)}`);
+console.log(`calibration: tau=${(cal.tau * 1000).toFixed(2)} ms (true ${((D + B) / SR * 1000).toFixed(2)}), coarse=${(cal.tauCoarse * 1000).toFixed(2)} ms, quality=${cal.quality.toFixed(3)}, level=${cal.level.toFixed(3)}, snr=${cal.snrDb} dB, passes=${JSON.stringify(cal.passes)}`);
 for (const f of [50, 92, 184, 250]) {
   const a = trueS(f), b = estS(f);
   const phErr = Math.atan2(b[1] * a[0] - b[0] * a[1], b[0] * a[0] + b[1] * a[1]) * 180 / Math.PI;

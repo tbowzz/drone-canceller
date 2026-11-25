@@ -2,6 +2,7 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const CAL_KEY = 'droneCanceller.cal.v1';
+  const DIAG_KEY = 'droneCanceller.diag.v1';
   const SET_KEY = 'droneCanceller.settings.v1';
   const DEFAULTS = { tones: 2, fmin: 30, fmax: 250, adapt: 1.2, maxOut: 0.5 };
 
@@ -16,6 +17,7 @@
   let ctx = null, stream = null, node = null, micSrc = null, anMic = null, anD = null, sink = null;
   let running = false, calibrating = false, wakeLock = null;
   let cal = null, lastStats = null, trackTimer = null, raf = 0, pendingCal = null, note = null;
+  let diag = store.get(DIAG_KEY) || null, lastRecs = null, micInfo = null;
   const tracker = new DSP.ToneTracker();
   let specMic = null, specD = null;
 
@@ -86,6 +88,57 @@
     const best = list.reduce((a, b) => ((b.baseDb ?? -999) > (a.baseDb ?? -999) ? b : a));
     const red = best.baseDb !== null ? best.baseDb - best.eDb : 0;
     setStatus(red >= 1 ? `Cancelling ${best.f.toFixed(1)} Hz: ${red.toFixed(0)} dB quieter at the phone.` : `Locking on to ${best.f.toFixed(1)} Hz…`);
+  }
+
+  // ---------- diagnostics ----------
+  function diagText() {
+    if (!diag) return 'No calibration attempt yet.';
+    const lines = [
+      `${diag.ok ? 'OK' : 'FAILED'} ${diag.time}`,
+      `sweep clarity ${diag.snrDb} dB (needs 16) · delay ${diag.delayMs} ms, spread ${diag.spreadMs} ms across passes (needs ≤30) · agree ${diag.agree} · level ${diag.level}`,
+      ...diag.passes.map((p, i) => `pass ${i + 1}: delay ${p.delayMs} ms, clarity ${p.snrDb} dB, mic ${p.sweepDb} dBFS during sweep vs ${p.quietDb} after`),
+      `audio ${diag.sampleRate} Hz · mic ${diag.mic ? JSON.stringify(diag.mic) : 'unknown'}`,
+      diag.ua,
+    ];
+    return lines.join('\n');
+  }
+
+  function renderDiag() {
+    $('diagText').textContent = diagText();
+    $('saveRec').disabled = !lastRecs;
+  }
+
+  function wavBlob(recs, sr) {
+    const n = recs.reduce((a, r) => a + r.length, 0);
+    const buf = new ArrayBuffer(44 + 2 * n);
+    const v = new DataView(buf);
+    const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + 2 * n, true); str(8, 'WAVE'); str(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, 2 * sr, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, 2 * n, true);
+    let o = 44;
+    for (const r of recs) for (let i = 0; i < r.length; i++, o += 2) v.setInt16(o, Math.max(-1, Math.min(1, r[i])) * 32767, true);
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  async function saveRecording() {
+    if (!lastRecs) return;
+    const name = `drone-cal-${lastRecs.sr}-${DSP.CAL.passes}pass.wav`;
+    const file = new File([wavBlob(lastRecs.recs, lastRecs.sr)], name, { type: 'audio/wav' });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
+  async function copyDiag() {
+    try { await navigator.clipboard.writeText(diagText()); $('copyDiag').textContent = 'Copied'; }
+    catch { $('copyDiag').textContent = 'Copy failed: select the text instead'; }
+    setTimeout(() => { $('copyDiag').textContent = 'Copy diagnostics'; }, 2500);
   }
 
   // ---------- spectrum ----------
@@ -181,9 +234,39 @@
       }
       setStatus('Calibrating: measuring…');
       await new Promise((r) => setTimeout(r, 30));
+      lastRecs = { recs, sr };
       const result = DSP.analyzeCalibration(sweep, recs, sr);
-      if (result.quality < 0.5 || !(result.level > 0)) {
-        setStatus('Couldn’t hear the sweep clearly. Turn the stereo up, check the phone is playing through it, and tap Recalibrate.', true);
+      // Mic level while the sweep plays vs. the quiet tail after it.
+      const db = (a, i0, i1) => {
+        let e = 0;
+        for (let i = i0; i < i1; i++) e += a[i] * a[i];
+        return 10 * Math.log10(e / Math.max(1, i1 - i0) + 1e-20);
+      };
+      const levels = recs.map((r) => ({
+        sweepDb: +db(r, Math.round(0.3 * sr), sweep.length).toFixed(1),
+        quietDb: +db(r, recLength - Math.round(0.6 * sr), recLength).toFixed(1),
+      }));
+      const lift = Math.min(...levels.map((l) => l.sweepDb - l.quietDb));
+      // A real stereo arrives at the same delay on every pass; noise peaks land anywhere.
+      const delays = result.passes.map((p) => p.delayMs);
+      const spreadMs = Math.max(...delays) - Math.min(...delays);
+      const ok = result.snrDb >= 16 && spreadMs <= 30 && result.level > 0;
+      diag = {
+        time: new Date().toISOString(), ok, ua: navigator.userAgent, sampleRate: sr, mic: micInfo,
+        delayMs: +(result.tau * 1000).toFixed(1), spreadMs: +spreadMs.toFixed(1), snrDb: result.snrDb, agree: +result.quality.toFixed(3),
+        level: +result.level.toExponential(2), passes: result.passes.map((p, i) => Object.assign({}, p, levels[i])),
+      };
+      store.set(DIAG_KEY, diag);
+      renderDiag();
+      if (!ok) {
+        const silent = Math.max(...levels.map((l) => l.sweepDb)) < -85;
+        const msg = silent
+          ? 'The mic is recording silence, so calibration can’t work. Diagnostics below.'
+          : lift < 3
+            ? 'The mic didn’t pick up the sweeps over the background noise. Did you hear three rising tones from the car speakers? Diagnostics below.'
+            : 'The mic heard the sweeps but the stereo’s delay didn’t come out the same on each one. Diagnostics below.';
+        setStatus(msg, true);
+        $('diag').open = true;
         return false;
       }
       cal = Object.assign(result, { date: Date.now() });
@@ -243,6 +326,14 @@
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
       });
       const micTrack = stream.getAudioTracks()[0];
+      try {
+        await micTrack.applyConstraints({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+      } catch { /* not supported */ }
+      const st = micTrack.getSettings ? micTrack.getSettings() : {};
+      micInfo = {
+        label: micTrack.label, sampleRate: st.sampleRate, channelCount: st.channelCount,
+        echoCancellation: st.echoCancellation, noiseSuppression: st.noiseSuppression, autoGainControl: st.autoGainControl,
+      };
       const micRate = micTrack.getSettings && micTrack.getSettings().sampleRate;
       if (micRate && micRate !== ctx.sampleRate) {
         // A context running at a different rate from the mic can distort on iOS.
@@ -250,7 +341,7 @@
         ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive', sampleRate: micRate });
       }
       await waitRunning();
-      await ctx.audioWorklet.addModule('anc-worklet.js');
+      await ctx.audioWorklet.addModule('anc-worklet.js?v=2');
 
       micSrc = ctx.createMediaStreamSource(stream);
       node = new AudioWorkletNode(ctx, 'anc', {
@@ -326,6 +417,8 @@
   // ---------- wiring ----------
   $('start').addEventListener('click', () => (running ? stop() : start()));
   $('recal').addEventListener('click', recalibrate);
+  $('copyDiag').addEventListener('click', copyDiag);
+  $('saveRec').addEventListener('click', saveRecording);
   $('toneCount').addEventListener('click', (e) => {
     const n = Number(e.target.dataset && e.target.dataset.n);
     if (n) { settings.tones = n; saveSettings(); }
@@ -357,6 +450,7 @@
 
   cal = store.get(CAL_KEY);
   renderCal();
+  renderDiag();
   renderSettings();
   renderTones();
 })();
