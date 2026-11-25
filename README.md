@@ -8,8 +8,8 @@ stereo (Bluetooth or CarPlay), adjusting it until the drone gets quieter at the 
 - `anc-worklet.js`: audio-thread canceller (per-tone adaptive weight, delay-compensated
   demodulation, frequency-locked loop, step-size control, safety resets).
 - `dsp.js`: FFT, calibration sweep and analysis, peak picking, tone tracker.
-- `test/sim.cjs`: offline simulation against a synthetic car (`node test/sim.cjs --help`
-  isn't implemented; see the flags at the top of the file).
+- `test/sim.cjs`: offline simulation against a synthetic car, e.g. `node test/sim.cjs --tones 2 --drift 1`
+  (flags are listed at the top of the file).
 
 Calibration plays three 3-second sweeps and measures the stereo's delay and response;
 it's stored per sample rate in the browser.
