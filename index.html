@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Drone Canceller</title>
+<meta name="description" content="Cancels a steady drivetrain drone through the car stereo using the phone's mic.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Drone Cancel">
+<meta name="theme-color" content="#101214">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root {
+    --bg: #f4f5f6; --surface: #ffffff; --text: #15181b; --muted: #5d6670; --line: #dde1e5;
+    --accent: #0f8a7e; --accent-text: #ffffff; --without: #c2671d; --warn: #a4471c;
+    --grid: rgba(0,0,0,0.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101214; --surface: #1a1d20; --text: #e9ecef; --muted: #98a1ab; --line: #2b3035;
+      --accent: #3cc6b6; --accent-text: #07201d; --without: #e59a52; --warn: #f0a070;
+      --grid: rgba(255,255,255,0.07);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101214; --surface: #1a1d20; --text: #e9ecef; --muted: #98a1ab; --line: #2b3035;
+    --accent: #3cc6b6; --accent-text: #07201d; --without: #e59a52; --warn: #f0a070;
+    --grid: rgba(255,255,255,0.07);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  }
+  main { max-width: 520px; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { font-size: 22px; margin: 4px 0 0; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+  button { font: inherit; border: 0; border-radius: 12px; cursor: pointer; }
+  .primary {
+    width: 100%; min-height: 64px; font-size: 20px; font-weight: 600;
+    background: var(--accent); color: var(--accent-text);
+  }
+  .primary.stop { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+  .primary:disabled { opacity: 0.6; }
+  .secondary { padding: 10px 14px; background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  .status { margin: 0; font-size: 17px; min-height: 1.45em; }
+  .status.warn { color: var(--warn); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  canvas { width: 100%; height: 180px; display: block; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 0 0 6px; }
+  td { padding: 6px 0; border-top: 1px solid var(--line); font-size: 17px; }
+  td.num, th.num { text-align: right; }
+  .empty { color: var(--muted); margin: 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .calinfo { margin: 0; font-size: 15px; }
+  .calinfo.warn { color: var(--warn); }
+  details summary { cursor: pointer; font-weight: 600; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after { content: "＋"; float: right; color: var(--muted); }
+  details[open] summary::after { content: "－"; }
+  .field { display: grid; gap: 4px; margin-top: 14px; }
+  .field label { font-size: 14px; display: flex; justify-content: space-between; }
+  .field label span { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .field small { color: var(--muted); font-size: 13px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=number] {
+    font: inherit; width: 100%; padding: 8px 10px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { border-radius: 0; padding: 9px 0; background: transparent; color: var(--text); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+  .check { display: flex; gap: 10px; align-items: center; font-size: 15px; margin-top: 16px; }
+  .check input { width: 20px; height: 20px; accent-color: var(--accent); }
+  #trims[hidden] { display: none; }
+  ul.tips { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  ul.tips li + li { margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Drone Canceller</h1>
+    <p class="sub">Plays anti-noise through the car stereo to quiet a steady drivetrain drone.</p>
+  </header>
+
+  <button id="start" class="primary">Start</button>
+  <p id="status" class="status" role="status" aria-live="polite">Tap Start. The first run calibrates the stereo (about 18 seconds of sweeps).</p>
+
+  <section class="card">
+    <canvas id="spec" aria-label="Spectrum of the mic, with and without cancelling"></canvas>
+    <div class="legend">
+      <span><i style="background: var(--without)"></i>Without cancelling (estimated)</span>
+      <span><i style="background: var(--accent)"></i>Mic now</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Tones being cancelled</h2>
+    <div id="tones"><p class="empty">None yet.</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Calibration</h2>
+    <div class="row">
+      <p id="calInfo" class="calinfo">Not calibrated.</p>
+      <button id="recal" class="secondary" disabled>Recalibrate</button>
+    </div>
+  </section>
+
+  <details class="card" id="settings">
+    <summary>Settings</summary>
+    <div class="field">
+      <label>Tones to cancel</label>
+      <div class="seg" id="toneCount">
+        <button data-n="1">1</button><button data-n="2">2</button><button data-n="3">3</button>
+      </div>
+      <small>Use 2 or 3 if the drone has overtones.</small>
+    </div>
+    <div class="field">
+      <label>Search range (Hz)</label>
+      <div class="pair">
+        <input id="fmin" type="number" inputmode="numeric" min="15" max="400" step="5" aria-label="Lowest frequency">
+        <input id="fmax" type="number" inputmode="numeric" min="30" max="480" step="5" aria-label="Highest frequency">
+      </div>
+    </div>
+    <div class="field">
+      <label for="adapt">Adaptation time <span id="adaptVal"></span></label>
+      <input id="adapt" type="range" min="0.6" max="4" step="0.1">
+      <small>Shorter follows speed changes faster; longer is steadier.</small>
+    </div>
+    <div class="field">
+      <label for="maxOut">Max anti-noise level <span id="maxOutVal"></span></label>
+      <input id="maxOut" type="range" min="0.1" max="0.9" step="0.05">
+    </div>
+    <label class="check"><input id="hold" type="checkbox"> Hold and tune by ear</label>
+    <div id="trims" hidden>
+      <div class="field">
+        <label for="trimDeg">Phase <span id="trimDegVal"></span></label>
+        <input id="trimDeg" type="range" min="-180" max="180" step="5" value="0">
+      </div>
+      <div class="field">
+        <label for="trimDb">Level <span id="trimDbVal"></span></label>
+        <input id="trimDb" type="range" min="-12" max="6" step="0.5" value="0">
+      </div>
+      <small>Freezes the anti-noise so you can adjust it for your ears instead of the mic. Unchecking keeps your adjustment.</small>
+    </div>
+  </details>
+
+  <ul class="tips">
+    <li>Mount the phone near your head. The quiet spot forms around the mic.</li>
+    <li>Calibrate while parked, at the stereo volume you drive with.</li>
+    <li>Works best at a steady cruise. It fades during hard acceleration and recovers once speed settles.</li>
+  </ul>
+</main>
+<script src="dsp.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
